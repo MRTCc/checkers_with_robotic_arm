@@ -6,6 +6,7 @@ import datetime
 import os
 import numpy as np
 import pickle
+import serial
 
 from ultralytics import YOLO
 from ultralytics.utils.plotting import Annotator  # ultralytics.yolo.utils.plotting is deprecated
@@ -21,6 +22,7 @@ ansi_white = "\u001b[37m"
 ansi_reset = "\u001b[0m"
 
 VIDEO_SOURCE = 0
+
 
 class Node:
     def __init__(self, board, move=None, parent=None, value=None):
@@ -116,6 +118,8 @@ class PoseEstimator:
         self.RED_BGR = (0, 0, 255)
         self.THICKNESS = 3
 
+        self.in_board_error = np.array([10., 10.])
+
     def estimate_parameters(self, gray):
         ret, self.corners = cv.findChessboardCorners(gray, self.GRID_SHAPE, None)
         if ret:
@@ -141,6 +145,13 @@ class PoseEstimator:
     def get_projected_cells(self):
         return self.projected_cells
 
+    def is_pixel_in_board(self, pixel):
+        is_in_board = True
+
+        # if self.projected_cells[0] - self.in_board_error
+
+        return is_in_board
+
     def find_nearest_cell(self, pixel):
         tmp = np.empty(shape=[1, 1, pixel.shape[0]])
         tmp[:, :] = pixel
@@ -149,11 +160,10 @@ class PoseEstimator:
         nearest_cell = self.projected_cells[nearest_idx]
 
         i_pixel, j_pixel = -1, -1
-        for i in range(self.GRID_X):
+        for i in range(self.GRID_X + 1):
             for j in range(self.GRID_Y):
-                if i * self.GRID_X + j == nearest_idx:
+                if i * (self.GRID_X+1) + j == nearest_idx:
                     i_pixel, j_pixel = i, j
-                    is_found = True
                     break
             if i_pixel != -1 and j_pixel != -1:
                 break
@@ -166,8 +176,54 @@ class PoseEstimator:
         corner = tuple(self.corners[0].astype(int).ravel())
         img = cv.line(img, pt1=corner, pt2=tuple(self.projected_axis[0].astype(int).ravel()), color=self.BLU_BGR, thickness=self.THICKNESS)
         img = cv.line(img, pt1=corner, pt2=tuple(self.projected_axis[1].astype(int).ravel()), color=self.GREEN_BGR, thickness=self.THICKNESS)
-        img = cv.line(img, pt1=corner, pt2=tuple(self.projected_axis[2].astype(int).ravel()), color=self.RED_BGR, thickness=self.THICKNESS)
+        # img = cv.line(img, pt1=corner, pt2=tuple(self.projected_axis[2].astype(int).ravel()), color=self.RED_BGR, thickness=self.THICKNESS)
         return img
+
+    def draw_points(self, img, points):
+        for idx in range(points.shape[0]):
+            img = cv.circle(img, tuple(points[idx].astype(int).ravel()), 5, (0, 255, 0), -1)
+
+    @staticmethod
+    def draw_point(img, point):
+        return cv.circle(img, tuple(point.astype(int).ravel()), 5, (0, 255, 0), -1)
+
+    def draw_cells(self, img):
+        for idx in range(self.projected_cells.shape[0]):
+            img = cv.circle(img, tuple(self.projected_cells[idx].astype(int).ravel()), 5, self.RED_BGR, -1)
+        return img
+
+
+class RoboticArm:
+    def __init__(self, port: str = 'COM4'):
+        self.port = port
+        self.ser = serial.Serial(port)
+        print(f"[ROBOT] Connected to Robot on port {port}")
+
+    def move(self, move_dict):
+        if not isinstance(move_dict, dict):
+            raise TypeError("[ROBOT] ERROR: The move can be performed only if a dictionary is passed as input!")
+
+        if 'from' not in move_dict or 'to' not in move_dict:
+            raise ValueError(f"[ROBOT] ERROR: Missing 'from' and 'to' key in move_dict: {move_dict} !!!")
+
+        # muovi il pezzo del computer da from a to
+        # TODO
+
+        if 'capture' in move_dict:
+            # rimuovi il pezzo catturato
+            # TODO
+            pass
+
+        if 'king' in move_dict:
+            # chiedere all'utente di posizionare il pezzo di promozione
+            #TODO
+
+            # posizionare il pezzo di promozione in to sopra al pezzo già presente
+            # TODO
+            pass
+
+        val = input("[ROBOT] Waiting for robot actuation... press [m] when done.")
+        print(val)
 
 
 class Checkers:
@@ -197,6 +253,9 @@ class Checkers:
         self.calibration_frame = None
         self.model = YOLO(r'D:\IngMagistrale\Smart Robotics\MrCrabRobotArm\checkers_dataset\runs\detect\train2'
                           r'\weights\best.pt')
+
+        self.robot = None
+        self.old_matrix = self.matrix
 
     def position_computer(self):
         for i in range(3):
@@ -279,9 +338,6 @@ class Checkers:
                                 elif self.matrix[m][n][0] == "b" or self.matrix[m][n][0] == "B":
                                     self.player_pieces += 1
                         break
-
-    def get_player_move(self):
-        pass
 
     @staticmethod
     def find_available_moves(board, mandatory_jumping):
@@ -506,8 +562,7 @@ class Checkers:
             move[3]) + ").")
         print("It took him " + str(diff) + " seconds.")
 
-        # TODO: come faccio per le pedine mangiate? come faccio per le dame?
-        return [[move[0], move[1]], [move[2], move[3]]]
+        return move
 
     @staticmethod
     def minimax(board, depth, alpha, beta, maximizing_player, mandatory_jumping):
@@ -557,7 +612,19 @@ class Checkers:
         board[old_i][old_j] = "---"
         board[new_i][new_j] = letter + str(new_i) + str(new_j)
 
-    def wait_player_move(self):
+    def has_player_move(self):
+        available_moves = Checkers.find_player_available_moves(self.matrix, self.mandatory_jumping)
+        has_move = True
+        if len(available_moves) == 0:
+            has_move = False
+            if self.computer_pieces > self.player_pieces:
+                print(
+                    ansi_red + "You have no moves left, and you have fewer pieces than the computer.YOU LOSE!" + ansi_reset)
+            else:
+                print(ansi_yellow + "You have no available moves.\nGAME ENDED!" + ansi_reset)
+        return has_move
+
+    def wait_for_player_move(self):
         print("Press [m] to confirm the move, or [s] to quit in the visualization window...")
         while True:
             ret, frame = self.cap.read()
@@ -565,14 +632,49 @@ class Checkers:
                 print("[PLAYER] Can't receive frame (stream end?). Exiting ...")
                 break
 
-            self.pose_estimator.draw_axis(frame)
+            detection_frame, loc_frame = self.detection_board(np.copy(frame))
+
             cv.imshow("Game", frame)
-            if cv.waitKey(0) == ord('m'):
+            cv.imshow("Detection", detection_frame)
+            self.pose_estimator.draw_axis(loc_frame)
+            cv.imshow("Localization", loc_frame)
+
+            key = cv.waitKey(5)
+            if key == ord('m'):
                 print("[PLAYER] Move confirmed.")
-                break
-            elif cv.waitKey(0) == ord('s'):
+                cv.imwrite(self.game_directory + f'game_{self.counter_picture}.png', frame)
+                cv.imwrite(self.game_directory + f'detection_{self.counter_picture}.png', detection_frame)
+                cv.imwrite(self.game_directory + f'localization_{self.counter_picture}.png', loc_frame)
+                return True
+            elif key == ord('s'):
                 print(ansi_cyan + "Coward." + ansi_reset)
-                exit()
+                return False
+
+    def detection_board(self, frame):
+        results = self.model(frame)
+
+        # convert bounding boxes into board coordinates
+        self.reset_board()
+        annotator = Annotator(frame)
+        update_frame = np.copy(self.calibration_frame)
+        for res in results:
+            boxes = res.boxes
+            for box in boxes:
+                # (left, top, right, bottom) format
+                shift_x = (-box.xyxy[0, 0] + box.xyxy[0, 2]) / 2
+                shift_y = (-box.xyxy[0, 1] + box.xyxy[0, 3]) / 2
+                x_c = box.xyxy[0, 0] + shift_x
+                y_c = box.xyxy[0, 1] + shift_y
+
+                self.update_board(np.float32([x_c, y_c]), box.cls)
+
+                annotator.box_label(box.xyxy[0], self.model.names[int(box.cls)])
+                update_frame = self.pose_estimator.draw_point(update_frame, np.float32([x_c, y_c]))
+
+        frame = annotator.result()
+        update_frame = self.pose_estimator.draw_cells(update_frame)
+
+        return frame, update_frame
 
     def reset_board(self):
         for i in range(8):
@@ -581,53 +683,55 @@ class Checkers:
 
     def update_board(self, pixel, piece_class):
         # piece_class: 1, black (player); 2, black king; 3, white (computer); 4, white king
+        try:
+            i, j = self.pose_estimator.find_nearest_cell(pixel)
+        except ValueError as e:
+            i, j = 0, 0
+            print(f"[VISION] Warning: At pixel {pixel}, detected piece class {piece_class}!!!")
+            return
 
-        i, j = self.pose_estimator.find_nearest_cell(pixel)
-
+        # TODO: l'inizializzazione del reference frame della board non è consistente, perché non è consistente
+        # findchessboard corners.... per ora non so come risolvere la cosa
         if piece_class == 1:
-            self.matrix[i][j] = f'b{i}{j}'
+            self.matrix[j][7-i] = f'b{j}{7-i}'
         elif piece_class == 2:
-            self.matrix[i][j] = f'B{i}{j}'
+            self.matrix[j][7-i] = f'B{j}{7-i}'
         elif piece_class == 3:
-            self.matrix[i][j] = f'c{i}{j}'
+            self.matrix[j][7-i] = f'c{j}{7-i}'
         elif piece_class == 4:
-            self.matrix[i][j] = f'C{i}{j}'
+            self.matrix[j][7-i] = f'C{j}{7-i}'
         else:
             raise ValueError(f"[VISION] ERROR: Invalid piece class {piece_class} for piece detected in {pixel}!")
 
-    def detection_board(self):
-        print("[VISION] Board scanning...")
-        while True:
-            ret, frame = self.cap.read()
-            if not ret:
-                raise ValueError("[VISION] ERROR: Impossible to acquire board. No frame available!")
+    def find_board_differences(self, ignore_indeces):
+        differences = []
+        for i in range(len(self.old_matrix)):
+            for j in range(len(self.old_matrix[0])):
 
-            print("[VISION] Board acquired.")
-            cv.imwrite(self.game_directory + f'board_{self.counter_picture}.jpg', frame)
-            self.counter_picture += 1
-            break
+                if (i, j) in ignore_indeces:
+                    continue
 
-        # Perform detection on the captured frame
-        results = self.model(frame)
+                if self.old_matrix[i][j] != self.matrix[i][j]:
+                    differences.append((i, j))
+        return differences
 
-        # convert bounding boxes into board coordinates
-        self.reset_board()
-        annotator = Annotator(frame)
-        for res in results:
-            boxes = res.boxes
-            for box in boxes:
-                # (left, top, right, bottom) format
-                x_c = (box.xyxy[0, 0] + box.xyxy[0, 1]) / 2
-                y_c = (box.xyxy[0, 2] + box.xyxy[0, 3]) / 2
-                self.update_board(np.float32([x_c, y_c]), box.cls)
-                annotator.box_label(box.xyxy[0], self.model.names[int(box.cls)])
-        frame = annotator.result()
-        while True:
-            cv.imshow('Detected Frame', frame)
-            if cv.waitKey(0) == ord('m'):
-                break
+    def convert_move_for_robot(self, move):
+        move_dict = {'from': (move[0], move[1]),
+                     'to': (move[2], move[3])}
+
+        # check for captures
+        differences = self.find_board_differences(ignore_indeces=[move_dict['from'], move_dict['to']])
+        if len(differences) == 1:
+            move_dict['capture'] = differences[0]
+
+        # check for king promotion
+        if 'C' in self.matrix[move[0]][move[1]]:
+            move_dict['king'] = True
+
+        return move_dict
 
     def play(self):
+        self.print_matrix()
         print(ansi_cyan + "##### WELCOME TO CHECKERS ####" + ansi_reset)
         print("\nSome basic rules:")
         print("1.You enter the coordinates in the form i,j.")
@@ -659,8 +763,6 @@ class Checkers:
         print("[MAIN] Initialization of vision system...")
         print("\tPlease position the board. It has to be empty! (And don't move it during the game)")
         print("Press [m] in the visualization window to confirm the board position.")
-        ret = False
-        frame = None
         while True:
             ret, frame = self.cap.read()
             if not ret:
@@ -673,6 +775,7 @@ class Checkers:
                 exit()
             elif key == ord('m'):
                 self.calibration_frame = frame
+                cv.imwrite(self.game_directory + 'setup_frame.png', self.calibration_frame)
                 break
             cv.imshow('Set-up Frame', frame)
         cv.destroyWindow('Set-up Frame')
@@ -681,6 +784,31 @@ class Checkers:
         gray = cv.cvtColor(self.calibration_frame, cv.COLOR_BGR2GRAY)
         self.pose_estimator.estimate_parameters(gray)
 
+        print("[MAIN] Now you can position the pieces on the board."
+              "Press [m] in the visualization window to confirm the pieces start position.")
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                print("Can't receive frame (stream end?). Exiting ...")
+                break
+
+            # Display the resulting frame
+            key = cv.waitKey(5)
+            if key == 27:  # esc character
+                exit()
+            elif key == ord('m'):
+                self.detection_board(frame)
+                cv.imwrite(self.game_directory + 'game_init.png', frame)
+                break
+            self.pose_estimator.draw_axis(frame)
+            cv.imshow('Pieces Set-up Frame', frame)
+        cv.destroyWindow('Pieces Set-up Frame')
+
+        print("[MAIN] Robot set up...")
+        self.robot = RoboticArm()
+
+        print("[MAIN] You can set-up the board. When you are ready, make your move.")
+
         while True:
             ret, frame = self.cap.read()
 
@@ -688,29 +816,35 @@ class Checkers:
                 print("[MAIN] Can't receive frame (stream end?). Exiting ...")
 
             self.print_matrix()
+
+            # player turn
             if self.player_turn is True:
                 print(ansi_cyan + "\nPlayer's turn." + ansi_reset)
 
-                self.wait_player_move()
+                if not self.has_player_move():
+                    break
 
-                # vision system
-                # TODO
-                self.detection_board()
+                if not self.wait_for_player_move():
+                    # player wants to exit the game
+                    break
 
-                # TODO: lavorare su questa funzione
-                self.get_player_move()  # invece di self.get_player_input()
+            # computer turn
             else:
                 print(ansi_cyan + "Computer's turn." + ansi_reset)
                 print("Thinking...")
 
-                self.evaluate_states()
+                self.old_matrix = self.matrix
+                move = self.evaluate_states()
 
-                # vision system -> compute coordinates
-                # TODO
+                # compute coordinates
+                move_dict = self.convert_move_for_robot(move)
+                print(move_dict)
 
                 # robot actuation of the move
-                # TODO
+                print("[MAIN] Moving robot...")
+                self.robot.move(move_dict)
 
+            # check end-game conditions
             if self.player_pieces == 0:
                 self.print_matrix()
                 print(ansi_red + "You have no pieces left.\nYOU LOSE!" + ansi_reset)
@@ -726,11 +860,18 @@ class Checkers:
                     break
             self.player_turn = not self.player_turn
 
-            cv.imshow('Game', frame)
-            if cv.waitKey(5) == ord('s'):
-                print(ansi_cyan + "Coward." + ansi_reset)
+            # # visualization
+            # cv.imshow('Game', frame)
+            # if cv.waitKey(0) == ord('s'):
+            #     print(ansi_cyan + "Coward." + ansi_reset)
+
+            self.counter_picture += 1
+
+        print("[MAIN] Game ended. Releasing resources...")
         self.cap.release()
         cv.destroyAllWindows()
+
+        print("[MAIN] Game ended. Bye!")
 
 
 if __name__ == '__main__':

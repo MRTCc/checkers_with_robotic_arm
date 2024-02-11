@@ -142,16 +142,6 @@ class PoseEstimator:
         imgpts, jac = cv.projectPoints(self.cells.reshape(-1, 3), self.rvecs, self.tvecs, self.mtx, self.dist)
         return imgpts
 
-    def get_projected_cells(self):
-        return self.projected_cells
-
-    def is_pixel_in_board(self, pixel):
-        is_in_board = True
-
-        # if self.projected_cells[0] - self.in_board_error
-
-        return is_in_board
-
     def find_nearest_cell(self, pixel):
         tmp = np.empty(shape=[1, 1, pixel.shape[0]])
         tmp[:, :] = pixel
@@ -192,12 +182,141 @@ class PoseEstimator:
             img = cv.circle(img, tuple(self.projected_cells[idx].astype(int).ravel()), 5, self.RED_BGR, -1)
         return img
 
+    def get_projected_cells(self):
+        return self.projected_cells
+
+    def get_cells(self):
+        return self.cells
+
 
 class RoboticArm:
-    def __init__(self, port: str = 'COM4'):
+    def __init__(self, link1: float, link2: float, cells, port: str = 'COM5'):
         self.port = port
         self.ser = serial.Serial(port)
         print(f"[ROBOT] Connected to Robot on port {port}")
+
+        self.link1 = link1  # length of first link (cm)
+        self.link2 = link2  # length of second link (cm)
+
+        self.cells = cells  # array shape (n_cells, 3) -> 3d position of each cell
+        self.GRID_SIZE = 8
+
+        self.OKAY_MSG = 'okay'
+
+        self.SHOULDER_IDLE_ANGLE = 0
+        self.ELBOW_IDLE_ANGLE = 0
+        self.BASE_IDLE_ANGLE = 0
+
+        self.REST_CODE = 0
+        self.SHOULDER_CODE = 1
+        self.ELBOW_CODE = 2
+        self.ELBOW_UP_CODE = 3
+        self.CLOSE_GRIPPER_CODE = 4
+        self.OPEN_GRIPPER_CODE = 5
+        self.BASE_CODE = 6
+
+    def wait_until_msg(self, msg: str):
+        while True:
+            rec = self.ser.readline().decode().strip()
+            if msg in rec:
+                break
+            else:
+                print("Received message:", rec)
+
+    def command(self, code: int, arg: int = 0, wait: bool = True):
+        # Convert code and arg to bytes
+        command_bytes = bytes([code])
+        arg_bytes = bytes([arg])
+
+        # Send the command code and argument to Arduino
+        # TODO: da verificare che questa riga sia corretta
+        self.ser.write(command_bytes + arg_bytes)
+
+        print(f"[SERIAL] Command {code} with argument {arg} sent!")
+
+        if wait:
+            self.wait_until_msg(self.OKAY_MSG)
+
+    def convert_cell_to_3d(self, cell):
+        i, j = cell[0], cell[1]
+        return self.cells[i * self.GRID_SIZE + j]
+
+    def inverse_kinematics(self, x, y, z):
+        s_angle, e_angle = 0, 0
+        # TODO: implementare le formule
+
+        return round(s_angle), round(e_angle)
+
+    @staticmethod
+    def compute_base_angle(x: float, y: float):
+        angle = math.atan(y / x) * 180 / math.pi
+
+        # TODO: non sono sicuro del significato e dell'utilità di questo blocco di codice
+        if angle < 0:
+            angle += 180
+        if x < 0:  # adjusting angle when square is to the left of base.
+            angle -= x*3
+
+        return round(angle)
+
+    def go_to_rest(self):
+        self.command(self.ELBOW_CODE, self.ELBOW_IDLE_ANGLE)
+        self.command(self.CLOSE_GRIPPER_CODE)
+        self.command(self.SHOULDER_CODE, self.SHOULDER_IDLE_ANGLE)
+        self.command(self.BASE_CODE, self.BASE_IDLE_ANGLE)
+
+    def go_to(self, x, y, z):
+        # calcolare angolo base
+        base_angle = self.compute_base_angle(x, y)
+
+        # allineare base
+        self.command(self.BASE_CODE, base_angle)
+
+        # cinematica inversa del 2r planar robot
+        s_angle, e_angle = self.inverse_kinematics(x, y, z)
+
+        # muovere spalla
+        self.command(self.SHOULDER_CODE, s_angle)
+
+        # muovere elbow
+        self.command(self.ELBOW_CODE, e_angle)
+
+    def move_from_to(self, start_cell, end_cell):
+        # convert start_cell coordinates
+        x_start, y_start, z_start = self.convert_cell_to_3d(start_cell)
+
+        # convert end_cell coordinates
+        x_end, y_end, z_end = self.convert_cell_to_3d(end_cell)
+
+        # send command to Arduino to move to start cell
+        self.go_to(x_start, y_start, z_start)
+
+        # grab the piece
+        self.command(self.CLOSE_GRIPPER_CODE)
+
+        # lift elbow from the chessboard by a certain degree
+        # TODO: forse sarebbe più comodo incorporare questo step nel comando del gripper
+        self.command(self.ELBOW_UP_CODE)
+
+        # send command to Arduino to move to end cell
+        self.go_to(x_end, y_end, z_end)
+
+        # release the piece
+        self.command(self.OPEN_GRIPPER_CODE)
+
+        self.command(self.ELBOW_UP_CODE)
+
+        # send command to Arduino to move to idle state
+        self.go_to_rest()
+
+    def capture_piece(self, piece_cell):
+        pass
+
+    def promote_to_king(self, piece_cell):
+        pass
+
+    def move_king(self, start_cell, end_cell):
+        pass
 
     def move(self, move_dict):
         if not isinstance(move_dict, dict):
@@ -208,20 +327,33 @@ class RoboticArm:
 
         # muovi il pezzo del computer da from a to
         # TODO
+        self.move_from_to(move_dict['from'], move_dict['to'])
 
         if 'capture' in move_dict:
             # rimuovi il pezzo catturato
             # TODO
-            pass
+            self.capture_piece(move_dict['capture'])
+
+        if 'promotion' in move_dict:
+            # chiedere all'utente di posizionare il pezzo di promozione
+            # TODO
+            while True:
+                key = input(f"[ROBOT] Piece {move_dict['to']} got promoted. Please position the king-piece, "
+                            f"then input [m] when done, in the console.")
+                if key == 'm':
+                    break
+                else:
+                    print("[ROBOT] Invalid key!")
+
+            # TODO
+            # posizionare il pezzo di promozione in to sopra al pezzo già presente
+            self.promote_to_king(move_dict['to'])
 
         if 'king' in move_dict:
-            # chiedere all'utente di posizionare il pezzo di promozione
-            #TODO
+            # TODO: muovere king
+            self.move_king(move_dict['from'], move_dict['to'])
 
-            # posizionare il pezzo di promozione in to sopra al pezzo già presente
-            # TODO
-            pass
-
+        # only for DEBUG!!!
         val = input("[ROBOT] Waiting for robot actuation... press [m] when done.")
         print(val)
 
@@ -716,8 +848,9 @@ class Checkers:
         return differences
 
     def convert_move_for_robot(self, move):
-        move_dict = {'from': (move[0], move[1]),
-                     'to': (move[2], move[3])}
+        # conversion from internal checkers reference system to pose_estimator reference system
+        move_dict = {'from': (move[1] + 7, move[0]),
+                     'to': (move[3] + 7, move[2])}
 
         # check for captures
         differences = self.find_board_differences(ignore_indeces=[move_dict['from'], move_dict['to']])
@@ -725,6 +858,10 @@ class Checkers:
             move_dict['capture'] = differences[0]
 
         # check for king promotion
+        if 'C' in self.matrix[move[2]][move[3]]:
+            move_dict['promotion'] = True
+
+        # check for king movement
         if 'C' in self.matrix[move[0]][move[1]]:
             move_dict['king'] = True
 
@@ -805,7 +942,7 @@ class Checkers:
         cv.destroyWindow('Pieces Set-up Frame')
 
         print("[MAIN] Robot set up...")
-        self.robot = RoboticArm()
+        self.robot = RoboticArm(link1=5, link2=5, cells=self.pose_estimator.get_cells())
 
         print("[MAIN] You can set-up the board. When you are ready, make your move.")
 
@@ -831,7 +968,7 @@ class Checkers:
             # computer turn
             else:
                 print(ansi_cyan + "Computer's turn." + ansi_reset)
-                print("Thinking...")
+                print("[MAIN] Thinking...")
 
                 self.old_matrix = self.matrix
                 move = self.evaluate_states()

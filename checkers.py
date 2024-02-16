@@ -7,6 +7,7 @@ import os
 import numpy as np
 import pickle
 import serial
+import struct
 
 from ultralytics import YOLO
 from ultralytics.utils.plotting import Annotator  # ultralytics.yolo.utils.plotting is deprecated
@@ -192,7 +193,7 @@ class PoseEstimator:
 class RoboticArm:
     def __init__(self, link1: float, link2: float, cells, port: str = 'COM5'):
         self.port = port
-        self.ser = serial.Serial(port)
+        self.ser = serial.Serial(port=port, baudrate=9600)
         print(f"[ROBOT] Connected to Robot on port {port}")
 
         self.link1 = link1  # length of first link (cm)
@@ -203,117 +204,172 @@ class RoboticArm:
 
         self.OKAY_MSG = 'okay'
 
-        self.SHOULDER_IDLE_ANGLE = 0
-        self.ELBOW_IDLE_ANGLE = 0
-        self.BASE_IDLE_ANGLE = 0
+        self.SHOULDER_IDLE_ANGLE = 1
+        self.ELBOW_IDLE_ANGLE = 1
+        self.ELBOW_UP_ANGLE = 20
+        self.BASE_IDLE_ANGLE = 1
+        self.CLOSE_GRIPPER_ANGLE = 1
+        self.OPEN_GRIPPER_ANGLE = 1
 
         self.REST_CODE = 0
         self.SHOULDER_CODE = 1
         self.ELBOW_CODE = 2
         self.ELBOW_UP_CODE = 3
-        self.CLOSE_GRIPPER_CODE = 4
-        self.OPEN_GRIPPER_CODE = 5
-        self.BASE_CODE = 6
+        self.GRIPPER_CODE = 4
+        self.BASE_CODE = 5
+
+        self.X_SHIFT_ROBOT_FRAME = 3
+        self.Y_SHIFT_ROBOT_FRAME = - 3
+
+        time.sleep(5)
+        self.go_to_rest()
 
     def wait_until_msg(self, msg: str):
         while True:
             rec = self.ser.readline().decode().strip()
-            if msg in rec:
+            print(f"[FROM SERIAL] Message received: {rec}")
+            if self.OKAY_MSG in rec:
                 break
-            else:
-                print("Received message:", rec)
+
+        print("[FROM SERIAL] Task done!")
 
     def command(self, code: int, arg: int = 0, wait: bool = True):
-        # Convert code and arg to bytes
-        command_bytes = bytes([code])
-        arg_bytes = bytes([arg])
+        if arg < 0 or arg > 180:
+            raise ValueError("ERROR: Invalid argument (angle)!!!")
 
         # Send the command code and argument to Arduino
-        # TODO: da verificare che questa riga sia corretta
-        self.ser.write(command_bytes + arg_bytes)
+        data = struct.pack('BB', code, arg)
+        self.ser.write(data)
 
-        print(f"[SERIAL] Command {code} with argument {arg} sent!")
+        print(f"[ROBOT] Command {code} with argument {arg} sent!")
+        # print(data)
 
         if wait:
             self.wait_until_msg(self.OKAY_MSG)
 
     def convert_cell_to_3d(self, cell):
-        i, j = cell[0], cell[1]
+        i, j = cell[1], cell[0]
         return self.cells[i * self.GRID_SIZE + j]
 
-    def inverse_kinematics(self, x, y, z):
-        s_angle, e_angle = 0, 0
-        # TODO: implementare le formule
+    def inverse_kinematics(self, x, y):
+        # TODO: (io ho bisogno della soluzione elbow up) controllare che questa formula sia corretta
+        # e_angle = math.degrees(- math.acos((x**2 + y**2 - self.link1**2 - self.link2**2)/(2*self.link1*self.link2)))
+        # s_angle = math.degrees(math.atan(y/x) - math.atan((self.link2*math.sin(e_angle))/(self.link1 + self.link2*math.cos(e_angle))))
+
+        c2 = (x ** 2 + y ** 2 - self.link1 ** 2 - self.link2 ** 2) / (2 * self.link1 * self.link2)
+
+        if c2 < -1 or c2 > 1:
+            print("[ROBOT] Outside workspace!")
+            raise ValueError("[ROBOT] Outside workspace!")
+
+        s2 = - math.sqrt(1 - c2 ** 2)
+
+        e_angle = math.degrees(math.atan2(s2, c2))
+        s_angle = math.atan2(y, x) - math.atan2(self.link2 * s2, self.link1 + self.link2 * c2)
+
+        # transformation for servo motors
+        e_angle = 180 - e_angle
 
         return round(s_angle), round(e_angle)
 
-    @staticmethod
-    def compute_base_angle(x: float, y: float):
-        angle = math.atan(y / x) * 180 / math.pi
-
-        # TODO: non sono sicuro del significato e dell'utilità di questo blocco di codice
-        if angle < 0:
-            angle += 180
-        if x < 0:  # adjusting angle when square is to the left of base.
-            angle -= x*3
-
-        return round(angle)
+    def compute_base_angle(self, x: float, y: float):
+        return round(180 - math.degrees(math.atan2(y, x)))
 
     def go_to_rest(self):
         self.command(self.ELBOW_CODE, self.ELBOW_IDLE_ANGLE)
-        self.command(self.CLOSE_GRIPPER_CODE)
+        self.command(self.GRIPPER_CODE, self.OPEN_GRIPPER_ANGLE)
         self.command(self.SHOULDER_CODE, self.SHOULDER_IDLE_ANGLE)
         self.command(self.BASE_CODE, self.BASE_IDLE_ANGLE)
 
-    def go_to(self, x, y, z):
-        # calcolare angolo base
-        base_angle = self.compute_base_angle(x, y)
+    def grab_piece(self):
+        self.command(self.GRIPPER_CODE, self.CLOSE_GRIPPER_ANGLE)
+        self.command(self.ELBOW_CODE, self.ELBOW_UP_ANGLE)
 
-        # allineare base
+    def release_piece(self):
+        self.command(self.GRIPPER_CODE, self.OPEN_GRIPPER_ANGLE)
+        self.command(self.ELBOW_CODE, self.ELBOW_UP_ANGLE)
+
+    def go_to(self, x, y):
+        # transformation to robot reference frame (translation)
+        x_1 = x - 3
+        y_1 = y + 3
+
+        # compute base angle
+        base_angle = self.compute_base_angle(x_1, y_1)
+        dist = math.sqrt(x_1 ** 2 + y_1 ** 2)
+
+        # align base
         self.command(self.BASE_CODE, base_angle)
 
-        # cinematica inversa del 2r planar robot
-        s_angle, e_angle = self.inverse_kinematics(x, y, z)
+        # 2R planar robot inverse kinematics
+        # TODO: devo capire bene i vari passaggi di reference frame
+        try:
+            s_angle, e_angle = self.inverse_kinematics(x=dist, y=0)
+        except ValueError as e:
+            self.go_to_rest()
+            print(e)
+            return
 
-        # muovere spalla
+        # shoulder joint
         self.command(self.SHOULDER_CODE, s_angle)
 
-        # muovere elbow
+        # elbow joint
         self.command(self.ELBOW_CODE, e_angle)
 
     def move_from_to(self, start_cell, end_cell):
-        # convert start_cell coordinates
         x_start, y_start, z_start = self.convert_cell_to_3d(start_cell)
 
-        # convert end_cell coordinates
         x_end, y_end, z_end = self.convert_cell_to_3d(end_cell)
 
-        # send command to Arduino to move to start cell
-        self.go_to(x_start, y_start, z_start)
+        print("go_to")
+        self.go_to(x_start, y_start)
 
-        # grab the piece
-        self.command(self.CLOSE_GRIPPER_CODE)
+        print("grab_piece")
+        self.grab_piece()
 
-        # lift elbow from the chessboard by a certain degree
-        # TODO: forse sarebbe più comodo incorporare questo step nel comando del gripper
-        self.command(self.ELBOW_UP_CODE)
+        print("go_to")
+        self.go_to(x_end, y_end)
 
-        # send command to Arduino to move to end cell
-        self.go_to(x_end, y_end, z_end)
+        print("release")
+        self.release_piece()
 
-        # release the piece
-        self.command(self.OPEN_GRIPPER_CODE)
-
-        self.command(self.ELBOW_UP_CODE)
-
-        # send command to Arduino to move to idle state
+        print("rest")
         self.go_to_rest()
 
     def capture_piece(self, piece_cell):
-        pass
+        x_start, y_start, z_start = self.convert_cell_to_3d(piece_cell)
+
+        self.go_to(x_start, y_start)
+
+        self.grab_piece()
+
+        release_cell = self.cells[39]
+        x_end, y_end, z_end = self.convert_cell_to_3d(release_cell)
+        y_end += 1
+
+        self.go_to(x_end, y_end)
+
+        self.release_piece()
+
+        self.go_to_rest()
 
     def promote_to_king(self, piece_cell):
-        pass
+        spawn_cell = self.cells[39]
+
+        x_start, y_start, z_start = self.convert_cell_to_3d(spawn_cell)
+        y_start += 1
+
+        self.go_to(x_start, y_start)
+
+        self.grab_piece()
+
+        x_end, y_end, z_end = self.convert_cell_to_3d(piece_cell)
+
+        self.go_to(x_end, y_end)
+
+        self.release_piece()
+
+        self.go_to_rest()
 
     def move_king(self, start_cell, end_cell):
         pass
@@ -325,18 +381,13 @@ class RoboticArm:
         if 'from' not in move_dict or 'to' not in move_dict:
             raise ValueError(f"[ROBOT] ERROR: Missing 'from' and 'to' key in move_dict: {move_dict} !!!")
 
-        # muovi il pezzo del computer da from a to
-        # TODO
         self.move_from_to(move_dict['from'], move_dict['to'])
 
         if 'capture' in move_dict:
-            # rimuovi il pezzo catturato
-            # TODO
+            # TODO: debuggare
             self.capture_piece(move_dict['capture'])
 
         if 'promotion' in move_dict:
-            # chiedere all'utente di posizionare il pezzo di promozione
-            # TODO
             while True:
                 key = input(f"[ROBOT] Piece {move_dict['to']} got promoted. Please position the king-piece, "
                             f"then input [m] when done, in the console.")
@@ -345,7 +396,7 @@ class RoboticArm:
                 else:
                     print("[ROBOT] Invalid key!")
 
-            # TODO
+            # TODO: da debuggare
             # posizionare il pezzo di promozione in to sopra al pezzo già presente
             self.promote_to_king(move_dict['to'])
 
@@ -849,8 +900,8 @@ class Checkers:
 
     def convert_move_for_robot(self, move):
         # conversion from internal checkers reference system to pose_estimator reference system
-        move_dict = {'from': (move[1] + 7, move[0]),
-                     'to': (move[3] + 7, move[2])}
+        move_dict = {'from': (move[0], 7-move[1]),
+                     'to': (move[2], 7-move[3])}
 
         # check for captures
         differences = self.find_board_differences(ignore_indeces=[move_dict['from'], move_dict['to']])
@@ -942,7 +993,7 @@ class Checkers:
         cv.destroyWindow('Pieces Set-up Frame')
 
         print("[MAIN] Robot set up...")
-        self.robot = RoboticArm(link1=5, link2=5, cells=self.pose_estimator.get_cells())
+        self.robot = RoboticArm(link1=5, link2=6, cells=self.pose_estimator.get_cells())
 
         print("[MAIN] You can set-up the board. When you are ready, make your move.")
 

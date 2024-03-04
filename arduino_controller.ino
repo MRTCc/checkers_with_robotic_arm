@@ -14,6 +14,11 @@ const int BASE_CODE = 9;
 
 String DONE_MSG = "okay";
 
+const int SHOULDER_IDLE_ANGLE = 90;
+const int ELBOW_IDLE_ANGLE = 80;
+const int GRIPPER_IDLE_ANGLE = 70;
+const int BASE_IDLE_ANGLE = 90;
+
 
 unsigned long previousMillis = 0;
 const long interval = 250;
@@ -250,25 +255,9 @@ void rest(){
       Serial.println("working on Gripper Rest position");
       previousMillis = currentMillis;
 
-      int g = gripperTo(180, ang_vel);
+      int g = gripperTo(GRIPPER_IDLE_ANGLE, ang_vel);
 
       if (g == IDLE_CODE){
-        is_moving = false;
-      }
-    }
-  }
-
-  is_moving = true;
-  while (is_moving){
-    unsigned long currentMillis = millis();
-
-    if (currentMillis - previousMillis >= interval) {
-      Serial.println("working on Elbow Rest position");
-      previousMillis = currentMillis;
-
-      int e = elbowTo(30, ang_vel);
-
-      if (e == IDLE_CODE){
         is_moving = false;
       }
     }
@@ -282,9 +271,25 @@ void rest(){
       Serial.println("working on Shoulder Rest position");
       previousMillis = currentMillis;
 
-      int s = shoulderTo(90, ang_vel);
+      int s = shoulderTo(SHOULDER_IDLE_ANGLE, ang_vel);
 
       if (s == IDLE_CODE){
+        is_moving = false;
+      }
+    }
+  }
+
+  is_moving = true;
+  while (is_moving){
+    unsigned long currentMillis = millis();
+
+    if (currentMillis - previousMillis >= interval) {
+      Serial.println("working on Elbow Rest position");
+      previousMillis = currentMillis;
+
+      int e = elbowTo(ELBOW_IDLE_ANGLE, ang_vel);
+
+      if (e == IDLE_CODE){
         is_moving = false;
       }
     }
@@ -298,7 +303,7 @@ void rest(){
       Serial.println("working on Base Rest position");
       previousMillis = currentMillis;
 
-      int b = baseTo(90, ang_vel);
+      int b = baseTo(BASE_IDLE_ANGLE, ang_vel);
 
       if (b == IDLE_CODE){
         is_moving = false;

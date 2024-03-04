@@ -196,30 +196,34 @@ class RoboticArm:
         self.ser = serial.Serial(port=port, baudrate=9600)
         print(f"[ROBOT] Connected to Robot on port {port}")
 
-        self.link1 = link1  # length of first link (cm)
-        self.link2 = link2  # length of second link (cm)
+        self.link1 = link1  # length of first link; N.B.: the unit measure is the board reference system unit
+        self.link2 = link2  # length of second link
 
         self.cells = cells  # array shape (n_cells, 3) -> 3d position of each cell
         self.GRID_SIZE = 8
 
         self.OKAY_MSG = 'okay'
 
-        self.SHOULDER_IDLE_ANGLE = 1
-        self.ELBOW_IDLE_ANGLE = 1
-        self.ELBOW_UP_ANGLE = 20
+        self.SHOULDER_IDLE_ANGLE = 90
+        self.ELBOW_IDLE_ANGLE = 58
+        self.ELBOW_UP_ANGLE = 58
         self.BASE_IDLE_ANGLE = 1
-        self.CLOSE_GRIPPER_ANGLE = 1
-        self.OPEN_GRIPPER_ANGLE = 1
+        self.CLOSE_GRIPPER_ANGLE = 20
+        self.OPEN_GRIPPER_ANGLE = 60
 
-        self.REST_CODE = 0
-        self.SHOULDER_CODE = 1
-        self.ELBOW_CODE = 2
-        self.ELBOW_UP_CODE = 3
-        self.GRIPPER_CODE = 4
-        self.BASE_CODE = 5
+        self.IDLE_CODE = 0
+        self.SHOULDER_CODE = 3
+        self.ELBOW_CODE = 5
+        self.GRIPPER_CODE = 10
+        self.BASE_CODE = 9
 
-        self.X_SHIFT_ROBOT_FRAME = 3
-        self.Y_SHIFT_ROBOT_FRAME = - 3
+        self.X_SHIFT_ROBOT_FRAME = -3.0
+        self.Y_SHIFT_ROBOT_FRAME = 3.0
+        # self.Z_SHIFT_ROBOT_FRAME = -5.0
+        # self.Z_SHIFT_ROBOT_FRAME = -3.7
+        self.Z_SHIFT_ROBOT_FRAME = 0
+
+        self.BASE_SHIFT_ANGLE = 28
 
         time.sleep(5)
         self.go_to_rest()
@@ -252,34 +256,36 @@ class RoboticArm:
         return self.cells[i * self.GRID_SIZE + j]
 
     def inverse_kinematics(self, x, y):
-        # TODO: (io ho bisogno della soluzione elbow up) controllare che questa formula sia corretta
-        # e_angle = math.degrees(- math.acos((x**2 + y**2 - self.link1**2 - self.link2**2)/(2*self.link1*self.link2)))
-        # s_angle = math.degrees(math.atan(y/x) - math.atan((self.link2*math.sin(e_angle))/(self.link1 + self.link2*math.cos(e_angle))))
-
-        c2 = (x ** 2 + y ** 2 - self.link1 ** 2 - self.link2 ** 2) / (2 * self.link1 * self.link2)
+        c2 = ((math.pow(x, 2) + math.pow(y, 2) - math.pow(self.link1, 2) - math.pow(self.link2, 2)) /
+              (2 * self.link1 * self.link2))
 
         if c2 < -1 or c2 > 1:
             print("[ROBOT] Outside workspace!")
             raise ValueError("[ROBOT] Outside workspace!")
 
-        s2 = - math.sqrt(1 - c2 ** 2)
+        s2 = - math.sqrt(1 - math.pow(c2, 2))
+
+        det = math.pow(self.link1, 2) + math.pow(self.link2, 2) + 2 * self.link1 * self.link2 * c2
+        assert det > 0
+
+        tmp_y = (y * (self.link1 + self.link2 * c2) - x * self.link2 * s2) / det
+        tmp_x = (x * (self.link1 + self.link2 * c2) + y * self.link2 * s2) / det
 
         e_angle = math.degrees(math.atan2(s2, c2))
-        s_angle = math.atan2(y, x) - math.atan2(self.link2 * s2, self.link1 + self.link2 * c2)
 
-        # transformation for servo motors
-        e_angle = 180 - e_angle
+        s_angle = math.degrees(math.atan2(tmp_y, tmp_x))
 
         return round(s_angle), round(e_angle)
 
     def compute_base_angle(self, x: float, y: float):
-        return round(180 - math.degrees(math.atan2(y, x)))
+        return round(180 - math.degrees(math.atan2(y, x)) - self.BASE_SHIFT_ANGLE)
 
     def go_to_rest(self):
-        self.command(self.ELBOW_CODE, self.ELBOW_IDLE_ANGLE)
-        self.command(self.GRIPPER_CODE, self.OPEN_GRIPPER_ANGLE)
-        self.command(self.SHOULDER_CODE, self.SHOULDER_IDLE_ANGLE)
-        self.command(self.BASE_CODE, self.BASE_IDLE_ANGLE)
+        # self.command(self.ELBOW_CODE, self.ELBOW_IDLE_ANGLE)
+        # self.command(self.GRIPPER_CODE, self.OPEN_GRIPPER_ANGLE)
+        # self.command(self.SHOULDER_CODE, self.SHOULDER_IDLE_ANGLE)
+        # self.command(self.BASE_CODE, self.BASE_IDLE_ANGLE)
+        self.command(self.IDLE_CODE, 0)
 
     def grab_piece(self):
         self.command(self.GRIPPER_CODE, self.CLOSE_GRIPPER_ANGLE)
@@ -289,32 +295,54 @@ class RoboticArm:
         self.command(self.GRIPPER_CODE, self.OPEN_GRIPPER_ANGLE)
         self.command(self.ELBOW_CODE, self.ELBOW_UP_ANGLE)
 
+    def rotate_point(self, x_1, y_1, angle):
+        # Determine rotation direction based on x_1
+        if x_1 >= 0:
+            direction = -1
+        else:
+            direction = +1  # counter-clock-wise
+
+        x_2 = x_1 * math.cos(angle) - y_1 * math.sin(angle)
+        y_2 = x_1 * math.sin(angle) + y_1 * math.cos(angle)
+
+        return x_2, y_2
+
     def go_to(self, x, y):
-        # transformation to robot reference frame (translation)
-        x_1 = x - 3
-        y_1 = y + 3
+        # transformation to robot reference frame (translation and rotation)
+        x_1 = x + self.X_SHIFT_ROBOT_FRAME
+        y_1 = y + self.Y_SHIFT_ROBOT_FRAME
 
         # compute base angle
         base_angle = self.compute_base_angle(x_1, y_1)
-        dist = math.sqrt(x_1 ** 2 + y_1 ** 2)
 
-        # align base
-        self.command(self.BASE_CODE, base_angle)
+        # tmp_angle = math.atan2(y_1, x_1)
+        rotation_angle = - math.pi / 2 + math.radians(base_angle)
+
+        x_2, y_2 = self.rotate_point(x_1, y_1, rotation_angle)
+
+        # dist = math.sqrt(math.pow(x_1, 2) + math.pow(y_1, 2))
 
         # 2R planar robot inverse kinematics
-        # TODO: devo capire bene i vari passaggi di reference frame
         try:
-            s_angle, e_angle = self.inverse_kinematics(x=dist, y=0)
+            s_angle, e_angle = self.inverse_kinematics(x=y_2, y=0)
         except ValueError as e:
             self.go_to_rest()
             print(e)
             return
 
-        # shoulder joint
-        self.command(self.SHOULDER_CODE, s_angle)
+        if e_angle > 0:
+            raise ValueError("[ROBOT] go_to: elbow angle positive:", e_angle)
+
+        e_angle += 180
+
+        # align base
+        self.command(self.BASE_CODE, base_angle)
 
         # elbow joint
         self.command(self.ELBOW_CODE, e_angle)
+
+        # shoulder joint
+        self.command(self.SHOULDER_CODE, s_angle)
 
     def move_from_to(self, start_cell, end_cell):
         x_start, y_start, z_start = self.convert_cell_to_3d(start_cell)
@@ -993,7 +1021,7 @@ class Checkers:
         cv.destroyWindow('Pieces Set-up Frame')
 
         print("[MAIN] Robot set up...")
-        self.robot = RoboticArm(link1=5, link2=6, cells=self.pose_estimator.get_cells())
+        self.robot = RoboticArm(link1=5, link2=6.4, cells=self.pose_estimator.get_cells())
 
         print("[MAIN] You can set-up the board. When you are ready, make your move.")
 
@@ -1063,5 +1091,20 @@ class Checkers:
 
 
 if __name__ == '__main__':
+    # cell is 2.2 cm
+    pose_estimator = PoseEstimator()
+    robot = RoboticArm(link1=5.454, link2=7.5, cells=pose_estimator.get_cells(), port='COM3')
+    robot.go_to_rest()
+
+    robot.move({'from': (0, 0),
+                'to': (1, 1)})
+    robot.move({'from': (1, 1),
+                'to': (2, 2)})
+    robot.move({'from': (2, 2),
+                'to': (3, 3)})
+
+    # robot.command(robot.SHOULDER_CODE, 150)
+
+
     checkers = Checkers()
     checkers.play()
